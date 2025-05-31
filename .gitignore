@@ -5,9 +5,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+/dump
+ddos-**
 # C extensions
 *.so
-
+petasehat-**
 # Distribution / packaging
 .Python
 build/
