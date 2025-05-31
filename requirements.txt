@@ -1,2 +1,8 @@
-beautifulsoup4
-requests
+fastapi
+uvicorn
+pydantic
+firebase-admin
+googlemaps
+geopy
+google-generativeai
+python-dotenv
