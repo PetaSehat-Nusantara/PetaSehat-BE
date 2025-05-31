@@ -3,10 +3,9 @@ import json
 import asyncio
 import logging
 from datetime import datetime
-from typing import AsyncGenerator, Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -15,32 +14,35 @@ from geopy.geocoders import Nominatim
 from google import genai
 
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware  
+from fastapi.middleware.cors import CORSMiddleware
+
 # ----------------------------
-# Configure Logging
+# Konfigurasi Logging & Env
 # ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 load_dotenv()
-app = FastAPI(title="Hospital Location Recommender (Streaming)", version="1.0.0")
+
+# ----------------------------
+# Inisialisasi FastAPI + CORS
+# ----------------------------
+app = FastAPI(title="Rekomendasi Lokasi Rumah Sakit", version="1.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        # Either explicitly list your front‐end’s origin(s), e.g.:
-        "http://localhost:3000",   # if your React/Vue front‐end is running on this port
+        "http://localhost:3000",
         "http://127.0.0.1:3000",
-        # Or use ["*"] if you want to allow every origin (not recommended for production,
-        # but okay for local dev).
-        # "*"
+        # ["*"] untuk pengembangan lokal (opsional)
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],         # <-- MUST include "OPTIONS"
-    allow_headers=["*"],                              # <-- allow any custom headers
-    allow_credentials=True,                           # <-- if you send cookies/auth tokens
+    allow_methods=["GET", "POST", "OPTIONS"],  # Harus mencakup "OPTIONS"
+    allow_headers=["*"],
+    allow_credentials=True,
 )
 
+
 # ----------------------------
-# Pydantic Models (for reference)
+# Pydantic Models
 # ----------------------------
 class InformasiUmum(BaseModel):
     facilityClass: str
@@ -50,15 +52,18 @@ class InformasiUmum(BaseModel):
     minCapacity: int
     services: List[str]
 
+
 class KriteriaDemografi(BaseModel):
     targetDemografiUtama: List[str]
     targetPendapatanPasien: List[str]
+
 
 class KriteriaKeuangan(BaseModel):
     estimasiAnggaranMaksimum: int
     estimasiAnggaranMinimum: int
     targetROI: int
     targetWaktuPembangunan: str
+
 
 class LokasiLahan(BaseModel):
     accessibilityPreferences: List[str]
@@ -69,44 +74,13 @@ class LokasiLahan(BaseModel):
     landPreferences: List[str]
     province: str
 
-class HospitalRequest(BaseModel):
-    informasiUmum: InformasiUmum
-    kriteriaDemografi: KriteriaDemografi
-    kriteriaKeuangan: KriteriaKeuangan
-    lokasiLahan: LokasiLahan
-
-class InformasiUmum(BaseModel):
-    facilityClass: str
-    facilityName: str
-    facilityType: str
-    maxCapacity: int
-    minCapacity: int
-    services: List[str]
-
-class KriteriaDemografi(BaseModel):
-    targetDemografiUtama: List[str]
-    targetPendapatanPasien: List[str]
-
-class KriteriaKeuangan(BaseModel):
-    estimasiAnggaranMaksimum: int
-    estimasiAnggaranMinimum: int
-    targetROI: int
-    targetWaktuPembangunan: str
-
-class LokasiLahan(BaseModel):
-    accessibilityPreferences: List[str]
-    areaPreferences: List[str]
-    city: str
-    district: str
-    environmentalPreferences: List[str]
-    landPreferences: List[str]
-    province: str
 
 class HospitalRequest(BaseModel):
     informasiUmum: InformasiUmum
     kriteriaDemografi: KriteriaDemografi
     kriteriaKeuangan: KriteriaKeuangan
     lokasiLahan: LokasiLahan
+
 
 class LocationRecommendation(BaseModel):
     kecamatan: str
@@ -119,43 +93,52 @@ class LocationRecommendation(BaseModel):
     justification: str
     impact_metrics: Dict[str, Any]
     normalized_scores: Dict[str, float]
+    # Tambahan field sesuai permintaan:
+    kecocokan_percentage: float
+    poin_unggul: List[str]
+    poin_perhatian: List[str]
+    estimasi_biaya_konstruksi: str
+    estimasi_waktu_pengembangan: str
+    luasan_bangunan: str
+
 
 class RecommendationResponse(BaseModel):
     recommendations: List[LocationRecommendation]
     methodology: str
     analysis_timestamp: str
     processing_steps: List[str]
-# (Other models like LocationRecommendation / RecommendationResponse
-# are no longer used directly for the streaming endpoint.)
+
 
 # ----------------------------
-# JSONOutputParser (unchanged)
+# JSONOutputParser (tidak berubah)
 # ----------------------------
 class JSONOutputParser:
     def parse(self, text: str) -> dict:
         try:
             t = text.strip()
             if t.startswith("```json"):
-                t = t[len("```json"):].strip()
+                t = t[len("```json") :].strip()
             if t.endswith("```"):
                 t = t[:-3].strip()
             return json.loads(t)
         except json.JSONDecodeError as e:
-            logger.error(f"JSON parsing error: {e}\nText was:\n{text}")
-            return {"error": f"Failed to parse JSON: {e}"}
+            logger.error(f"JSON parsing error: {e}\nTeks:\n{text}")
+            return {"error": f"Gagal mengurai JSON: {e}"}
+
 
 json_parser = JSONOutputParser()
 
 # ----------------------------
-# Global Service Placeholders
+# Placeholder Layanan Global
 # ----------------------------
 db = None
 gmaps = None
 geolocator = None
 genai_client = None
 
+
 # ----------------------------
-# Helper Functions (unchanged from before)
+# Fungsi Pembantu
 # ----------------------------
 async def get_firestore_schema_func() -> Dict[str, Any]:
     try:
@@ -173,12 +156,19 @@ async def get_firestore_schema_func() -> Dict[str, Any]:
                 }
         return schema
     except Exception as e:
-        logger.error(f"Error getting Firestore schema: {e}")
+        logger.error(f"Error mendapatkan skema Firestore: {e}")
         return {}
 
-async def collect_firestore_data_func(retrieval_plan: Dict[str, Any], target_province: str) -> Dict[str, Any]:
+
+async def collect_firestore_data_func(
+    retrieval_plan: Dict[str, Any], target_province: str
+) -> Dict[str, Any]:
     try:
-        plan = retrieval_plan if isinstance(retrieval_plan, dict) else json.loads(retrieval_plan)
+        plan = (
+            retrieval_plan
+            if isinstance(retrieval_plan, dict)
+            else json.loads(retrieval_plan)
+        )
         collected_data: Dict[str, Any] = {}
         for query_config in plan.get("collectionsToQuery", []):
             name = query_config["collection"]
@@ -204,15 +194,23 @@ async def collect_firestore_data_func(retrieval_plan: Dict[str, Any], target_pro
             collected_data[name] = docs_list
         return collected_data
     except Exception as e:
-        logger.error(f"Error collecting Firestore data: {e}")
+        logger.error(f"Error mengumpulkan data Firestore: {e}")
         return {"error": str(e)}
 
-def normalize_and_scale_func(locations_data: List[Dict[str, Any]], priority_weights: Dict[str, float]) -> List[Dict[str, Any]]:
+
+def normalize_and_scale_func(
+    locations_data: List[Dict[str, Any]], priority_weights: Dict[str, float]
+) -> List[Dict[str, Any]]:
     if not locations_data:
         return []
 
-    metrics = ["populationDensity", "healthcareGap", "economicViability", "demographicMatch", "accessibility"]
-    # Compute min/max for each metric
+    metrics = [
+        "populationDensity",
+        "healthcareGap",
+        "economicViability",
+        "demographicMatch",
+        "accessibility",
+    ]
     ranges: Dict[str, Dict[str, float]] = {}
     for m in metrics:
         vals = [float(loc.get(m, 0)) for loc in locations_data]
@@ -248,7 +246,10 @@ def normalize_and_scale_func(locations_data: List[Dict[str, Any]], priority_weig
         loc["rank"] = i + 1
     return scored
 
-async def get_gmaps_coordinates_func(kecamatan: str, city: str, province: str) -> Dict[str, Any]:
+
+async def get_gmaps_coordinates_func(
+    kecamatan: str, city: str, province: str
+) -> Dict[str, Any]:
     try:
         q = f"{kecamatan}, {city}, {province}, Indonesia"
         res = gmaps.geocode(q)
@@ -267,200 +268,210 @@ async def get_gmaps_coordinates_func(kecamatan: str, city: str, province: str) -
                 "lat": -6.2088,
                 "lng": 106.8456,
                 "place_id": None,
-                "formatted_address": f"Approximate location: {q}",
+                "formatted_address": f"Lokasi perkiraan: {q}",
                 "gmaps_url": None,
             }
     except Exception as e:
-        logger.error(f"Error getting coordinates for {kecamatan}: {e}")
+        logger.error(f"Error geocoding '{kecamatan}': {e}")
         return {
             "lat": -6.2088,
             "lng": 106.8456,
             "place_id": None,
-            "formatted_address": f"Error fetching location: {q}",
+            "formatted_address": f"Gagal geocode: {q}",
             "gmaps_url": None,
         }
 
+
 # ----------------------------
-# Startup Event (initialize Firebase, GMaps, GenAI)
+# Startup Event
 # ----------------------------
 @app.on_event("startup")
 async def startup_event():
     global db, gmaps, geolocator, genai_client
 
-    # 1) Initialize Firebase
+    # 1) Inisialisasi Firebase
     FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH")
     if not FIREBASE_CRED_PATH or not os.path.exists(FIREBASE_CRED_PATH):
-        raise RuntimeError(f"Missing or invalid FIREBASE_CRED_PATH: {FIREBASE_CRED_PATH!r}")
+        raise RuntimeError(
+            f"FIREBASE_CRED_PATH tidak ditemukan atau tidak valid: {FIREBASE_CRED_PATH!r}"
+        )
     try:
         if not firebase_admin._apps:
             cred = credentials.Certificate(FIREBASE_CRED_PATH)
             firebase_admin.initialize_app(cred)
         db = firestore.client()
         _ = list(db.collections())
-        logger.info("✅ Firebase connected.")
+        logger.info("✅ Firebase berhasil dihubungkan.")
     except Exception as e:
-        logger.error(f"❌ Firebase init failed: {e}")
-        raise RuntimeError(f"Failed to initialize Firebase: {e}")
+        logger.error(f"❌ Inisialisasi Firebase gagal: {e}")
+        raise RuntimeError(f"Gagal inisialisasi Firebase: {e}")
 
-    # 2) Initialize Google Maps
+    # 2) Inisialisasi Google Maps
     GMAPS_API_KEY = os.getenv("GMAPS_API_KEY")
     if not GMAPS_API_KEY:
-        raise RuntimeError("Missing GMAPS_API_KEY")
+        raise RuntimeError("GMAPS_API_KEY tidak ditemukan")
     try:
         gmaps = googlemaps.Client(key=GMAPS_API_KEY)
         test = gmaps.geocode("Jakarta, Indonesia")
         if not test:
-            raise Exception("Empty geocode result")
-        logger.info("✅ Google Maps API validated.")
+            raise Exception("Hasil geocode kosong")
+        logger.info("✅ Google Maps API berhasil divalidasi.")
     except Exception as e:
-        logger.error(f"❌ GMaps init failed: {e}")
-        raise RuntimeError(f"Failed to initialize Google Maps API: {e}")
+        logger.error(f"❌ Inisialisasi Google Maps gagal: {e}")
+        raise RuntimeError(f"Gagal inisialisasi Google Maps API: {e}")
 
-    # 3) (Optional) Initialize Nominatim
+    # 3) (Opsional) Inisialisasi Nominatim
     geolocator = Nominatim(user_agent="hospital_recommender")
 
-    # 4) Initialize GenAI Client
+    # 4) Inisialisasi GenAI Client
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     if not GOOGLE_API_KEY:
-        raise RuntimeError("Missing GOOGLE_API_KEY for GenAI")
+        raise RuntimeError("GOOGLE_API_KEY untuk GenAI tidak ditemukan")
     try:
         genai_client = genai.Client(api_key=GOOGLE_API_KEY)
         smoke = genai_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents="Hello, GenAI! If you can respond, please say 'ready'."
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents="Halo, GenAI! Jika kamu aktif, balas dengan 'siap'.",
         )
-        logger.info(f"✅ GenAI smoke test: {smoke.text[:20]!r}…")
+        logger.info(f"✅ Uji coba GenAI: {smoke.text[:20]!r}…")
     except Exception as e:
-        logger.error(f"❌ GenAI init failed: {e}")
-        raise RuntimeError(f"Failed to initialize GenAI: {e}")
+        logger.error(f"❌ Inisialisasi GenAI gagal: {e}")
+        raise RuntimeError(f"Gagal inisialisasi GenAI: {e}")
 
+
+# ----------------------------
+# Endpoint Biasa (tanpa streaming)
+# ----------------------------
 @app.post("/recommend-hospital-location", response_model=RecommendationResponse)
 async def recommend_hospital_location(request: HospitalRequest):
     """
-    Generate hospital location recommendations based on user criteria,
-    directly using genai.Client for each prompt step (no LangChain).
+    Menghasilkan rekomendasi lokasi rumah sakit berdasarkan kriteria pengguna,
+    menyimpan hasil ke Firestore pada koleksi 'NusaCari', dan mengembalikan respons.
+    Semua instruksi dan output dalam Bahasa Indonesia.
     """
     processing_steps: List[str] = []
 
-    # Ensure all services are initialized
+    # Pastikan semua layanan telah diinisialisasi
     if not all([db, gmaps, genai_client]):
         raise HTTPException(
             status_code=500,
-            detail="Recommender services not fully initialized. Check startup logs."
+            detail="Layanan rekomendasi belum sepenuhnya siap. Periksa log startup.",
         )
 
     try:
         # -------------------
-        # Step 1: Analyze Requirements
+        # Langkah 1: Analisis Kebutuhan Pengguna
         # -------------------
-        processing_steps.append("Analyzing user requirements…")
-        logger.info("Analyzing user requirements…")
+        processing_steps.append("Menganalisis kebutuhan pengguna…")
+        logger.info("Menganalisis kebutuhan pengguna…")
 
-        # Create prompt for requirements
         user_input_json = request.json()
         requirements_prompt = f"""
-You are a hospital-site planning assistant.
+Kamu adalah asisten perencanaan lokasi rumah sakit. Hanya berbicara dalam Bahasa Indonesia dan kembalikan jawaban murni dalam JSON.
 
-Given the user's JSON requirements:
+Berikan saya analisis kebutuhan berdasarkan data berikut (format JSON):
 {user_input_json}
 
-Identify and rank the priority factors (populationDensity, healthcareGap, economicViability, demographicMatch, accessibility).
-Return a JSON object EXACTLY in this form (no extra keys, no commentary):
+– Identifikasi dan urutkan faktor prioritas (populationDensity, healthcareGap, economicViability, demographicMatch, accessibility).
+– Kembalikan sebuah objek JSON persis dengan struktur ini (tanpa komentar tambahan):
 
 {{
   "priorityFactors": {{
-    "populationDensity": <weight>,
-    "healthcareGap": <weight>,
-    "economicViability": <weight>,
-    "demographicMatch": <weight>,
-    "accessibility": <weight>
+    "populationDensity": <angka bobot>,
+    "healthcareGap": <angka bobot>,
+    "economicViability": <angka bobot>,
+    "demographicMatch": <angka bobot>,
+    "accessibility": <angka bobot>
   }},
   "filters": {{
-    "province": <string>,
-    "facilityType": <string>
+    "province": "<nama provinsi>",
+    "facilityType": "<jenis fasilitas>"
   }}
 }}
 """
-
-        # Call GenAI
         req_response = genai_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=requirements_prompt
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents=requirements_prompt,
         )
         requirements_analysis = json_parser.parse(req_response.text)
 
         # -------------------
-        # Step 2: Get Firestore Schema and Plan Retrieval
+        # Langkah 2: Ambil Skema Firestore dan Rencanakan Retrieval
         # -------------------
-        processing_steps.append("Analyzing Firestore schema…")
-        logger.info("Analyzing Firestore schema…")
+        processing_steps.append("Menganalisis skema Firestore…")
+        logger.info("Menganalisis skema Firestore…")
         schema_dict = await get_firestore_schema_func()
         schema_json = json.dumps(schema_dict)
 
-        # Create prompt for retrieval plan
         retrieval_plan_prompt = f"""
-You have Firestore schema as JSON:
+Kamu memiliki skema Firestore (JSON) berikut:
 {schema_json}
 
-And you have extracted user priorities/filters as:
+Dan kamu memiliki analisis prioritas/filter pengguna (JSON):
 {json.dumps(requirements_analysis)}
 
-Generate a Firestore retrieval plan in JSON with this exact structure:
+Buat rencana query Firestore dalam bentuk JSON persis dengan struktur ini:
 
 {{
   "collectionsToQuery": [
     {{
-      "collection": "<collection_name>",
-      "fields": [ "<field1>", "<field2>", … ],
-      "filters": {{ "province": <string>, "facilityType": <string> }}
+      "collection": "<nama_koleksi>",
+      "fields": ["<field1>", "<field2>", …],
+      "filters": {{ "province": "{request.lokasiLahan.province}", "facilityType": "{request.informasiUmum.facilityType}" }}
     }},
     …
   ]
 }}
 """
-        # Call GenAI
         retrieval_plan_resp = genai_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=retrieval_plan_prompt
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents=retrieval_plan_prompt,
         )
         retrieval_plan = json_parser.parse(retrieval_plan_resp.text)
 
         # -------------------
-        # Step 3: Collect Data from Firestore
+        # Langkah 3: Himpun Data dari Firestore
         # -------------------
-        processing_steps.append("Collecting data from Firestore…")
-        logger.info("Collecting data from Firestore…")
+        processing_steps.append("Mengumpulkan data dari Firestore…")
+        logger.info("Mengumpulkan data dari Firestore…")
         collected_data = await collect_firestore_data_func(
-            retrieval_plan,
-            request.lokasiLahan.province
+            retrieval_plan, request.lokasiLahan.province
         )
 
         # -------------------
-        # Step 4: Extract Numeric Datapoints
+        # Langkah 4: Ekstrak Data Numerik
         # -------------------
-        processing_steps.append("Extracting numerical datapoints…")
-        logger.info("Extracting numerical datapoints…")
-
+        processing_steps.append("Mengekstrak data numerik…")
+        logger.info("Mengekstrak data numerik…")
         extracted_prompt = f"""
-You have raw Firestore data (JSON):
+Kamu memiliki data Firestore mentah (JSON):
 {json.dumps(collected_data)}
 
-And you have the user's priority analysis (JSON):
+Dan kamu memiliki analisis prioritas pengguna (JSON):
 {json.dumps(requirements_analysis)}
 
-for province: {request.lokasiLahan.province}
+Untuk provinsi: {request.lokasiLahan.province}
 
-Extract numeric metrics for each kecamatan into this JSON format EXACTLY:
+Ekstrak metrik numerik untuk setiap kecamatan ke dalam format JSON ini secara tepat:
 
 {{
   "locations": [
     {{
-      "kecamatan": "<kecamatan_name>",
-      "populationDensity": <number>,
-      "healthcareGap": <number>,
-      "economicViability": <number>,
-      "demographicMatch": <number>,
-      "accessibility": <number>
+      "kecamatan": "<nama_kecamatan>",
+      "populationDensity": <angka>,
+      "healthcareGap": <angka>,
+      "economicViability": <angka>,
+      "demographicMatch": <angka>,
+      "accessibility": <angka>
     }},
     …
   ]
@@ -468,55 +479,74 @@ Extract numeric metrics for each kecamatan into this JSON format EXACTLY:
 """
         extraction_resp = genai_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=extracted_prompt
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents=extracted_prompt,
         )
         extracted_data = json_parser.parse(extraction_resp.text)
 
         # -------------------
-        # Step 5: Normalize and Scale Scores
+        # Langkah 5: Normalisasi dan Skor
         # -------------------
-        processing_steps.append("Normalizing and scaling scores…")
-        logger.info("Normalizing and scaling scores…")
-
+        processing_steps.append("Menormalisasi dan memberi skor…")
+        logger.info("Menormalisasi dan memberi skor…")
         priority_weights = requirements_analysis.get("priorityFactors", {})
         scored_locations = normalize_and_scale_func(
-            extracted_data.get("locations", []),
-            priority_weights
+            extracted_data.get("locations", []), priority_weights
         )
 
         # -------------------
-        # Step 6: Impact Analysis (Top 5)
+        # Langkah 6: Analisis Dampak + Tambahan Field Kustom
         # -------------------
-        processing_steps.append("Analyzing potential impact…")
-        logger.info("Analyzing potential impact…")
-
-        top_5 = scored_locations[:5]
-        top_5_json = json.dumps(top_5)
+        processing_steps.append(
+            "Melakukan analisis dampak dan menambahkan field kustom…"
+        )
+        logger.info("Melakukan analisis dampak dan menambahkan field kustom…")
+        top_3 = scored_locations[:3]
+        top_3_json = json.dumps(top_3)
         hospital_specs_json = request.informasiUmum.json()
 
         impact_prompt = f"""
-Given the top-5 scored locations as JSON:
-{top_5_json}
+Kamu adalah asisten perencanaan. Semua output harus dalam Bahasa Indonesia, tepat format JSON.
 
-And the proposed hospital specifications (JSON):
+Berikut daftar 3 kecamatan terbaik (JSON), dengan skor dan metrik numerik:
+{top_3_json}
+
+Berikut spesifikasi rumah sakit yang diusulkan (JSON):
 {hospital_specs_json}
 
-For each location, estimate:
-  - population_served
-  - healthcare_gap_filled
-  - justification (short explanation)
-  - any additional impact_metrics
+Untuk setiap kecamatan di atas, buatlah objek JSON yang berisi:
+- "kecamatan"
+- "population_served" (perkiraan jumlah penduduk yang dilayani)
+- "healthcare_gap_filled" (perkiraan selisih kebutuhan layanan kesehatan yang terpenuhi)
+- "justification" (penjelasan singkat)
+- "impact_metrics" (objek metrik tambahan apa pun)
 
-Return EXACTLY a JSON under key "impact_analysis" with this structure:
+Tambahan:
+- "kecocokan_percentage" (persentase kecocokan lokasi, skala 0–100)
+- "poin_unggul" (daftar minimal 3 poin kekuatan/kelebihan lokasi)
+- "poin_perhatian" (daftar poin-poin yang perlu menjadi perhatian)
+- "estimasi_biaya_konstruksi" (rentang kisaran biaya pembangunan)
+- "estimasi_waktu_pengembangan" (perkiraan durasi pengembangan, mis. "12–18 bulan")
+- "luasan_bangunan" (misal "500m2" atau rentang)
+
+Kembalikan struktur persis seperti ini:
 
 {{
   "impact_analysis": [
     {{
-      "kecamatan": "<name>",
-      "population_served": <number>,
-      "healthcare_gap_filled": <number>,
-      "justification": "<text>",
-      "impact_metrics": {{ … }}
+      "kecamatan": "<nama>",
+      "population_served": <angka>,
+      "healthcare_gap_filled": <angka>,
+      "justification": "<teks>",
+      "impact_metrics": {{ … }},
+      "kecocokan_percentage": <angka>,
+      "poin_unggul": ["<poin1>", "<poin2>", "<poin3>"],
+      "poin_perhatian": ["<perhatianA>", "<perhatianB>"],
+      "estimasi_biaya_konstruksi": "<kisaran biaya>",
+      "estimasi_waktu_pengembangan": "<durasi>",
+      "luasan_bangunan": "<luasan>"
     }},
     …
   ]
@@ -524,406 +554,235 @@ Return EXACTLY a JSON under key "impact_analysis" with this structure:
 """
         impact_resp = genai_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=impact_prompt
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents=impact_prompt,
         )
         impact_analysis = json_parser.parse(impact_resp.text)
 
         # -------------------
-        # Step 7: Build Final Recommendations with GMaps Coordinates
+        # Langkah 7: Gabungkan Koordinat & Simpan Hasil ke Firestore
         # -------------------
-        processing_steps.append("Getting location coordinates…")
-        logger.info("Getting location coordinates…")
+        processing_steps.append(
+            "Menggabungkan koordinat, menyiapkan output akhir, dan menyimpan ke Firestore…"
+        )
+        logger.info(
+            "Menggabungkan koordinat, menyiapkan output akhir, dan menyimpan ke Firestore…"
+        )
 
         recommendations: List[LocationRecommendation] = []
-        impact_data_map = {
-            item.get("kecamatan"): item
-            for item in impact_analysis.get("impact_analysis", [])
+        firestore_record = {
+            "analysis_timestamp": datetime.now().isoformat(),
+            "methodology": (
+                "Analisis multi-faktor menggunakan kecocokan demografi, kebutuhan layanan kesehatan, "
+                "kelayakan ekonomi, serta aksesibilitas, dengan tambahan analisis AI untuk detail biaya, "
+                "waktu, dan luasan."
+            ),
+            "processing_steps": processing_steps,
+            "recommendations": [],
         }
 
-        top_3 = scored_locations[:3]
-        for loc in top_3:
-            kecamatan = loc.get("kecamatan", "Unknown")
-            coords = await get_gmaps_coordinates_func(
-                kecamatan,
-                request.lokasiLahan.city,
-                request.lokasiLahan.province
+        for item in impact_analysis.get("impact_analysis", []):
+            kecamatan = item.get("kecamatan", "Unknown")
+            lokasi_match = next(
+                (l for l in scored_locations if l["kecamatan"] == kecamatan), {}
             )
-            impact_info = impact_data_map.get(kecamatan, {})
+            coords = await get_gmaps_coordinates_func(
+                kecamatan, request.lokasiLahan.city, request.lokasiLahan.province
+            )
 
-            recommendation = LocationRecommendation(
+            rec = LocationRecommendation(
                 kecamatan=kecamatan,
                 gmaps_coordinates={"lat": coords["lat"], "lng": coords["lng"]},
                 gmaps_place_id=coords.get("place_id"),
-                composite_score=loc["composite_score"],
-                rank=loc["rank"],
-                population_served=impact_info.get(
-                    "population_served",
-                    loc.get("estimatedPopulationServed", 0)
-                ),
-                healthcare_gap_filled=impact_info.get(
-                    "healthcare_gap_filled",
-                    loc.get("currentHealthcareGap", 0)
-                ),
-                justification=impact_info.get(
-                    "justification",
-                    f"High composite score of {loc['composite_score']} based on demographic and healthcare factors."
-                ),
-                impact_metrics=impact_info.get("impact_metrics", {}),
-                normalized_scores=loc.get("normalized_scores", {})
+                composite_score=lokasi_match.get("composite_score", 0.0),
+                rank=lokasi_match.get("rank", 0),
+                population_served=item.get("population_served", 0),
+                healthcare_gap_filled=item.get("healthcare_gap_filled", 0.0),
+                justification=item.get("justification", ""),
+                impact_metrics=item.get("impact_metrics", {}),
+                normalized_scores=lokasi_match.get("normalized_scores", {}),
+                kecocokan_percentage=item.get("kecocokan_percentage", 0.0),
+                poin_unggul=item.get("poin_unggul", []),
+                poin_perhatian=item.get("poin_perhatian", []),
+                estimasi_biaya_konstruksi=item.get("estimasi_biaya_konstruksi", ""),
+                estimasi_waktu_pengembangan=item.get("estimasi_waktu_pengembangan", ""),
+                luasan_bangunan=item.get("luasan_bangunan", ""),
             )
-            recommendations.append(recommendation)
 
-        processing_steps.append("Recommendations generated successfully!")
+            recommendations.append(rec)
+            firestore_record["recommendations"].append(rec.dict())
+
+        # Simpan agregasi hasil ke koleksi "NusaCari"
+        try:
+            db.collection("NusaCari").add(firestore_record)
+            logger.info("✅ Hasil rekomendasi berhasil disimpan ke koleksi 'NusaCari'.")
+        except Exception as e:
+            logger.error(f"❌ Gagal menyimpan ke Firestore: {e}")
+
+        processing_steps.append("Hasil rekomendasi disimpan ke Firestore.")
 
         return RecommendationResponse(
             recommendations=recommendations,
-            methodology=(
-                "Multi-factor analysis using demographic match, healthcare gap, "
-                "economic viability, and accessibility scores with LLM-driven insights."
-            ),
-            analysis_timestamp=datetime.now().isoformat(),
-            processing_steps=processing_steps
+            methodology=firestore_record["methodology"],
+            analysis_timestamp=firestore_record["analysis_timestamp"],
+            processing_steps=processing_steps,
         )
 
     except Exception as e:
-        logger.error(f"Error in recommendation process: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+        logger.error(f"Kesalahan dalam proses rekomendasi: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Kesalahan proses: {str(e)}")
 
 
-# ----------------------------
-# Streaming Endpoint
-# ----------------------------
-@app.post("/recommend-hospital-location-stream")
-async def recommend_hospital_location_stream(request: Request) -> StreamingResponse:
+class GraphData(BaseModel):
+    # x‐axis (tahun)
+    x: List[int]
+    # y‐axis (nilai metrik)
+    y: List[float]
+
+
+class FinancialDataResponse(BaseModel):
+    # Tiap metrik sekarang berupa GraphData
+    pendapatan: GraphData
+    biaya: GraphData
+    gross_profit: GraphData
+
+
+@app.get("/financial-data", response_model=FinancialDataResponse)
+async def get_financial_data():
     """
-    Stream incremental JSON updates back to the client (newline-delimited JSON).
-    Each yielded line is one JSON object that includes:
-      { "step": "<description>", "data": <any> }
-    Or, in the final message, returns the “recommendations” array and metadata.
+    Mengambil data rekomendasi dari Firestore ('NusaCari'),
+    kemudian memanggil GenAI untuk memproyeksikan:
+      - pendapatan (total per tahun)
+      - biaya (asumsi 60% dari pendapatan)
+      - gross_profit = pendapatan - biaya
+    untuk tahun 2026–2031.
+    Output JSON tetap “murni” (tanpa penjelasan tambahan).
     """
-    # Validate that services are ready
-    if not all([db, gmaps, genai_client]):
-        raise HTTPException(
-            status_code=500,
-            detail="Recommender services not fully initialized. Check startup logs."
-        )
+    if not db or not genai_client:
+        raise HTTPException(status_code=500, detail="Layanan belum siap")
 
-    # Load and validate the incoming JSON body (HospitalRequest)
     try:
-        body = await request.json()
-        req_obj = HospitalRequest.parse_obj(body)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Invalid request body: {e}")
+        # 1) Ambil dokumen terbaru dari Firestore
+        docs = (
+            db.collection("NusaCari")
+            .order_by("analysis_timestamp", direction=firestore.Query.DESCENDING)
+            .limit(1)
+            .stream()
+        )
+        latest = None
+        for d in docs:
+            latest = d.to_dict()
+            break
 
-    async def event_generator() -> AsyncGenerator[bytes, None]:
-        """Yields newline-delimited JSON for each stage."""
+        if not latest:
+            raise HTTPException(status_code=404, detail="Tidak ada data di 'NusaCari'")
 
-        # Stage 1: Analyze Requirements
-        step1_desc = "Analyzing user requirements"
-        yield (json.dumps({"step": step1_desc}) + "\n").encode("utf-8")
-        user_input_json = json.dumps(body)  # using the raw JSON body as a string
-        requirements_prompt = f"""
-You are a hospital‐site planning assistant.
+        recs = latest.get("recommendations", [])
+        if not recs:
+            raise HTTPException(status_code=404, detail="Dokumen 'NusaCari' kosong")
 
-Given the user's JSON requirements:
-{user_input_json}
-
-Identify and rank the priority factors (populationDensity, healthcareGap, economicViability, demographicMatch, accessibility).
-Return a JSON object EXACTLY in this form (no extra keys):
-
-{{
-  "priorityFactors": {{
-    "populationDensity": <weight>,
-    "healthcareGap": <weight>,
-    "economicViability": <weight>,
-    "demographicMatch": <weight>,
-    "accessibility": <weight>
-  }},
-  "filters": {{
-    "province": "<string>",
-    "facilityType": "<string>"
-  }}
-}}
-"""
-        try:
-            resp1 = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=requirements_prompt
-            )
-            requirements_analysis = json_parser.parse(resp1.text)
-            yield (
-                json.dumps({
-                    "step": "Requirements analysis completed",
-                    "data": requirements_analysis
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error in requirements analysis",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return  # Stop streaming on error
-
-        # Stage 2: Plan Firestore Retrieval
-        step2_desc = "Planning Firestore retrieval"
-        yield (json.dumps({"step": step2_desc}) + "\n").encode("utf-8")
-        try:
-            schema_dict = await get_firestore_schema_func()
-            schema_json = json.dumps(schema_dict)
-            retrieval_plan_prompt = f"""
-You have Firestore schema as JSON:
-{schema_json}
-
-And you have extracted user priorities/filters as:
-{json.dumps(requirements_analysis)}
-
-Generate a Firestore retrieval plan in JSON with EXACT structure:
-
-{{
-  "collectionsToQuery": [
-    {{
-      "collection": "<collection_name>",
-      "fields": [ "<field1>", "<field2>", … ],
-      "filters": {{ "province": "{req_obj.lokasiLahan.province}", "facilityType": "{req_obj.informasiUmum.facilityType}" }}
-    }},
-    …
-  ]
-}}
-"""
-            resp2 = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=retrieval_plan_prompt
-            )
-            retrieval_plan = json_parser.parse(resp2.text)
-            yield (
-                json.dumps({
-                    "step": "Retrieval plan generated",
-                    "data": retrieval_plan
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error in retrieval planning",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
-
-        # Stage 3: Collect Data from Firestore
-        step3_desc = "Collecting data from Firestore"
-        yield (json.dumps({"step": step3_desc}) + "\n").encode("utf-8")
-        try:
-            collected_data = await collect_firestore_data_func(
-                retrieval_plan,
-                req_obj.lokasiLahan.province
-            )
-            yield (
-                json.dumps({
-                    "step": "Data collected",
-                    "sample": {  # send only a small “preview” of the data to avoid huge payloads
-                        col: docs[:2] for col, docs in collected_data.items()
-                    }
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error collecting data",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
-
-        # Stage 4: Extract Numeric Datapoints
-        step4_desc = "Extracting numeric datapoints"
-        yield (json.dumps({"step": step4_desc}) + "\n").encode("utf-8")
-        try:
-            extracted_prompt = f"""
-You have raw Firestore data (JSON):
-{json.dumps(collected_data)}
-
-And you have the user's priority analysis (JSON):
-{json.dumps(requirements_analysis)}
-
-for province: {req_obj.lokasiLahan.province}
-
-Extract numeric metrics for each kecamatan into this JSON format EXACTLY:
-
-{{
-  "locations": [
-    {{
-      "kecamatan": "<kecamatan_name>",
-      "populationDensity": <number>,
-      "healthcareGap": <number>,
-      "economicViability": <number>,
-      "demographicMatch": <number>,
-      "accessibility": <number>
-    }},
-    …
-  ]
-}}
-"""
-            resp4 = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=extracted_prompt
-            )
-            extracted_data = json_parser.parse(resp4.text)
-            yield (
-                json.dumps({
-                    "step": "Extraction complete",
-                    "data": {"locations_count": len(extracted_data.get("locations", []))}
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error extracting numeric datapoints",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
-
-        # Stage 5: Normalize & Score
-        step5_desc = "Normalizing and scoring locations"
-        yield (json.dumps({"step": step5_desc}) + "\n").encode("utf-8")
-        try:
-            priority_weights = requirements_analysis.get("priorityFactors", {})
-            scored_locations = normalize_and_scale_func(
-                extracted_data.get("locations", []),
-                priority_weights
-            )
-            yield (
-                json.dumps({
-                    "step": "Normalization & scoring done",
-                    "data": {
-                        "top_scores": [
-                            { "kecamatan": loc["kecamatan"], "score": loc["composite_score"] }
-                            for loc in scored_locations[:3]
-                        ]
-                    }
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error normalizing/scoring",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
-
-        # Stage 6: Impact Analysis (Top 5)
-        step6_desc = "Performing impact analysis"
-        yield (json.dumps({"step": step6_desc}) + "\n").encode("utf-8")
-        try:
-            top_5 = scored_locations[:5]
-            top_5_json = json.dumps(top_5)
-            hospital_specs_json = req_obj.informasiUmum.json()
-
-            impact_prompt = f"""
-Given the top-5 scored locations as JSON:
-{top_5_json}
-
-And the proposed hospital specifications (JSON):
-{hospital_specs_json}
-
-For each location, estimate:
-  - population_served
-  - healthcare_gap_filled
-  - justification (short explanation)
-  - any additional impact_metrics
-
-Return EXACTLY a JSON under key "impact_analysis" with this structure:
-
-{{
-  "impact_analysis": [
-    {{
-      "kecamatan": "<name>",
-      "population_served": <number>,
-      "healthcare_gap_filled": <number>,
-      "justification": "<text>",
-      "impact_metrics": {{ … }}
-    }},
-    …
-  ]
-}}
-"""
-            resp6 = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=impact_prompt
-            )
-            impact_analysis = json_parser.parse(resp6.text)
-            yield (
-                json.dumps({
-                    "step": "Impact analysis done",
-                    "data": {"impact_count": len(impact_analysis.get("impact_analysis", []))}
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error in impact analysis",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
-
-        # Stage 7: Build Final 3 Recommendations
-        step7_desc = "Fetching coordinates and building recommendations"
-        yield (json.dumps({"step": step7_desc}) + "\n").encode("utf-8")
-        try:
-            recommendations: List[Dict[str, Any]] = []
-            impact_map = { item["kecamatan"]: item for item in impact_analysis.get("impact_analysis", []) }
-            top_3 = scored_locations[:3]
-
-            for loc in top_3:
-                kec = loc["kecamatan"]
-                coords = await get_gmaps_coordinates_func(
-                    kec, req_obj.lokasiLahan.city, req_obj.lokasiLahan.province
-                )
-                imp = impact_map.get(kec, {})
-                rec = {
-                    "kecamatan": kec,
-                    "gmaps_coordinates": {"lat": coords["lat"], "lng": coords["lng"]},
-                    "gmaps_place_id": coords.get("place_id"),
-                    "composite_score": loc["composite_score"],
-                    "rank": loc["rank"],
-                    "population_served": imp.get("population_served", 0),
-                    "healthcare_gap_filled": imp.get("healthcare_gap_filled", 0),
-                    "justification": imp.get(
-                        "justification",
-                        f"High composite score of {loc['composite_score']}"
-                    ),
-                    "impact_metrics": imp.get("impact_metrics", {}),
-                    "normalized_scores": loc.get("normalized_scores", {}),
+        # 2) Susun input sederhana untuk LLM
+        simple_recs = []
+        for r in recs:
+            simple_recs.append(
+                {
+                    "kecamatan": r.get("kecamatan"),
+                    "population_served": r.get("population_served"),
+                    "healthcare_gap_filled": r.get("healthcare_gap_filled"),
+                    "impact_metrics": r.get("impact_metrics", {}),
                 }
-                recommendations.append(rec)
+            )
 
-            yield (
-                json.dumps({
-                    "step": "Final recommendations ready",
-                    "recommendations": recommendations,
-                    "methodology": (
-                        "Multi-factor analysis using demographic match, healthcare gap, "
-                        "economic viability, and accessibility scores with LLM-driven insights."
-                    ),
-                    "timestamp": datetime.now().isoformat()
-                }) + "\n"
-            ).encode("utf-8")
-        except Exception as e:
-            yield (
-                json.dumps({
-                    "step": "Error building final recommendations",
-                    "error": str(e)
-                }) + "\n"
-            ).encode("utf-8")
-            return
+        # 3) Buat prompt
+        prompt = f"""
+Kamu adalah asisten perencanaan finansial rumah sakit. Semua output harus dalam Bahasa Indonesia,
+murni JSON tanpa penjelasan tambahan.
 
-        # Done: close the generator
-        return
+Berikut data rekomendasi lokasi rumah sakit (array JSON) dengan metrik:
+{json.dumps(simple_recs)}
 
-    # Return a StreamingResponse with “application/x-ndjson” (newline-delimited JSON)
-    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+Berdasarkan data di atas, proyeksikan untuk tahun 2026 hingga 2031:
+1. “pendapatan”: total pendapatan tahunan dari kategori rawat_inap, rawat_jalan, layanan_unggulan.
+   - Untuk setiap tahun, jumlahkan nilai pada impact_metrics.rawat_inap[tahun],
+     impact_metrics.rawat_jalan[tahun], dan impact_metrics.layanan_unggulan[tahun]
+     di semua kecamatan.
+2. “biaya”: estimasi total biaya tahunan (asumsikan 60% dari pendapatan setiap tahun sebagai biaya operasional).
+3. “gross_profit”: pendapatan dikurangi biaya untuk tiap tahun.
+
+Keluaran persis dalam format:
+{{
+  "years": [2026,2027,2028,2029,2030,2031],
+  "pendapatan": [<angka2026>, <angka2027>, ..., <angka2031>],
+  "biaya": [<angka2026>, <angka2027>, ..., <angka2031>],
+  "gross_profit": [<angka2026>, <angka2027>, ..., <angka2031>]
+}}
+"""
+
+        # 4) Panggil GenAI
+        response = genai_client.models.generate_content(
+            model="gemini-2.0-flash",
+            config={
+                "response_mime_type": "application/json",
+            },
+            contents=prompt,
+        )
+
+        # **Logging: tampilkan isi mentah LLM supaya kita bisa inspect jika error**
+        raw_text = response.text or ""
+        logger.info(f"Hasil GenAI (mentah):\n{raw_text}")
+
+        # 5) Jika response.text kosong, kembalikan error yang lebih jelas
+        if not raw_text.strip():
+            raise HTTPException(
+                status_code=500, detail="LLM mengembalikan teks kosong."
+            )
+
+        # 6) Parse JSON menggunakan JSONOutputParser, bukan langsung json.loads
+        parsed = json_parser.parse(raw_text)
+        if "error" in parsed:
+            # Jika JSONOutputParser mem‐report kesalahan, tangani di sini
+            raise HTTPException(
+                status_code=500, detail=f"Error parsing JSON LLM: {parsed['error']}"
+            )
+
+        # 7) Extract hasil
+        years = parsed.get("years", [])
+        pendapatan_list = parsed.get("pendapatan", [])
+        biaya_list = parsed.get("biaya", [])
+        gross_list = parsed.get("gross_profit", [])
+
+        # Validasi jumlah elemen: harus 6 (2026–2031)
+        if not (
+            isinstance(years, list)
+            and len(years) == 6
+            and isinstance(pendapatan_list, list)
+            and len(pendapatan_list) == 6
+            and isinstance(biaya_list, list)
+            and len(biaya_list) == 6
+            and isinstance(gross_list, list)
+            and len(gross_list) == 6
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Output LLM tidak sesuai format/tahun. Diterima: years={years}, "
+                f"pendapatan={pendapatan_list}, biaya={biaya_list}, gross_profit={gross_list}",
+            )
+
+        # 8) Bungkus masing‐masing metrik ke GraphData
+        pendapatan_graph = {"x": years, "y": pendapatan_list}
+        biaya_graph = {"x": years, "y": biaya_list}
+        gross_graph = {"x": years, "y": gross_list}
+
+        return FinancialDataResponse(
+            pendapatan=pendapatan_graph, biaya=biaya_graph, gross_profit=gross_graph
+        )
+
+    except HTTPException:
+        # biarkan HTTPException dilempar‐ulang
+        raise
+    except Exception as e:
+        # Jika terjadi exception lain, log stack trace dan return 500
+        logger.error(f"Error di /financial-data: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Kesalahan server: {str(e)}")
